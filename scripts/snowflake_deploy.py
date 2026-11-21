@@ -2,7 +2,7 @@
 """
 Snowflake CD Deployment Script
 -------------------------------
-Deploys the dbt project to Snowflake using native Git integration
+Deploys the dbt project(s) to Snowflake using native Git integration
 and Snowflake's dbt Projects execution environment.
 
 This script is designed to be run from GitHub Actions CD pipeline.
@@ -54,15 +54,46 @@ DATABASE = get_env("SNOWFLAKE_DATABASE", required=False) or "ECOM_DB"
 GITHUB_REPO_URL = get_env("GITHUB_REPO_URL", required=False) or "https://github.com/SonjeVilas/dbt-project-factory.git"
 
 # Snowflake object names
-SCHEMA = "RAW"
-API_INTEGRATION = "GITHUB_API_INTEGRATION"
-GIT_REPO_NAME = "DBT_PROJECT_FACTORY_REPO"
-DBT_PROJECT_NAME = "RETAIL_DBT_PROJECT"
-DBT_PROJECT_PATH = "generated_projects/retail_dbt_v1"
-
-# Fully qualified names
+SCHEMA = get_env("SNOWFLAKE_SCHEMA", required=False) or "RAW"
+API_INTEGRATION = os.environ.get("SNOWFLAKE_API_INTEGRATION", "GITHUB_API_INTEGRATION")
+GIT_REPO_NAME = os.environ.get("SNOWFLAKE_GIT_REPO", "DBT_PROJECT_FACTORY_REPO")
 FQ_GIT_REPO = f"{DATABASE}.{SCHEMA}.{GIT_REPO_NAME}"
-FQ_DBT_PROJECT = f"{DATABASE}.{SCHEMA}.{DBT_PROJECT_NAME}"
+
+
+def get_projects_to_deploy() -> list[tuple[str, str]]:
+    """Determine which dbt project(s) to deploy: returns [(rel_path, snowflake_project_name)]."""
+    # 1. CLI argument takes highest precedence
+    if len(sys.argv) > 1 and not sys.argv[1].startswith("-"):
+        path = sys.argv[1].replace("\\", "/").rstrip("/")
+        name = sys.argv[2] if len(sys.argv) > 2 else os.environ.get("DBT_PROJECT_NAME", "")
+        if not name:
+            base = os.path.basename(path)
+            name = "RETAIL_DBT_PROJECT" if base == "retail_dbt_v1" else f"{base.upper()}_PROJECT"
+        return [(path, name)]
+
+    # 2. Explicit DBT_PROJECT_PATH environment variable
+    env_path = os.environ.get("DBT_PROJECT_PATH", "").strip().replace("\\", "/").rstrip("/")
+    if env_path and env_path.lower() != "all":
+        name = os.environ.get("DBT_PROJECT_NAME", "")
+        if not name:
+            base = os.path.basename(env_path)
+            name = "RETAIL_DBT_PROJECT" if base == "retail_dbt_v1" else f"{base.upper()}_PROJECT"
+        return [(env_path, name)]
+
+    # 3. Auto-discover all generated projects in generated_projects/
+    discovered = []
+    base_dir = "generated_projects"
+    if os.path.isdir(base_dir):
+        for item in sorted(os.listdir(base_dir)):
+            full_path = os.path.join(base_dir, item)
+            if os.path.isdir(full_path) and os.path.exists(os.path.join(full_path, "dbt_project.yml")):
+                rel_path = f"generated_projects/{item}"
+                name = "RETAIL_DBT_PROJECT" if item == "retail_dbt_v1" else f"{item.upper()}_PROJECT"
+                discovered.append((rel_path, name))
+
+    if not discovered:
+        return [("generated_projects/retail_dbt_v1", "RETAIL_DBT_PROJECT")]
+    return discovered
 
 
 def connect():
@@ -117,6 +148,11 @@ def main():
     conn = None
 
     try:
+        projects = get_projects_to_deploy()
+        print(f"📦 Projects targeted for deployment ({len(projects)}):")
+        for p_path, p_name in projects:
+            print(f"   • {p_name} -> {p_path}")
+
         conn = connect()
         cur = conn.cursor()
 
@@ -150,28 +186,28 @@ def main():
         branch_names = [row[0] if len(row) > 0 else str(row) for row in branches]
         print(f"📂 Available branches: {branch_names}")
 
-        # ── Step 5: Create/Replace dbt Project ──────────────────────
-        stage_path = f"@{FQ_GIT_REPO}/branches/main/{DBT_PROJECT_PATH}"
-        create_project_sql = f"""
-        CREATE OR REPLACE DBT PROJECT {FQ_DBT_PROJECT}
-            FROM '{stage_path}'
-        """
-        execute_sql(cur, create_project_sql, "Create/Replace dbt Project")
-        results_log["steps"].append({"step": "create_dbt_project", "status": "success"})
+        # ── Step 5 & 6: Deploy and build each project ─────────────────
+        for rel_path, proj_name in projects:
+            fq_dbt_project = f"{DATABASE}.{SCHEMA}.{proj_name}"
+            stage_path = f"@{FQ_GIT_REPO}/branches/main/{rel_path}"
 
-        # ── Step 6: Execute dbt build ────────────────────────────────
-        print("\n🚀 Executing dbt build (this may take several minutes)...")
-        execute_sql(
-            cur,
-            f"EXECUTE DBT PROJECT {FQ_DBT_PROJECT} ARGS = 'build'",
-            "Execute dbt build",
-        )
-        results_log["steps"].append({"step": "dbt_build", "status": "success"})
+            create_project_sql = f"""
+            CREATE OR REPLACE DBT PROJECT {fq_dbt_project}
+                FROM '{stage_path}'
+            """
+            execute_sql(cur, create_project_sql, f"Create/Replace dbt Project ({proj_name})")
+            results_log["steps"].append({"step": f"create_{proj_name}", "status": "success"})
+
+            print(f"\n🚀 Executing dbt build for {proj_name} (this may take several minutes)...")
+            execute_sql(
+                cur,
+                f"EXECUTE DBT PROJECT {fq_dbt_project} ARGS = 'build'",
+                f"Execute dbt build ({proj_name})",
+            )
+            results_log["steps"].append({"step": f"build_{proj_name}", "status": "success"})
 
         # ── Step 7: Check execution results ──────────────────────────
-        # Give Snowflake a moment to log the query
         time.sleep(5)
-
         history_sql = f"""
         SELECT QUERY_ID, QUERY_TEXT, EXECUTION_STATUS, ERROR_MESSAGE,
                TOTAL_ELAPSED_TIME, START_TIME
@@ -186,7 +222,7 @@ def main():
             history = execute_sql(cur, history_sql, "Query execution history")
             for row in history[:5]:
                 print(f"  Query: {row[0]} | Status: {row[2]} | Time: {row[4]}ms")
-                if row[3]:  # error message
+                if row[3]:
                     print(f"  ⚠️  Error: {row[3]}")
         except Exception as e:
             print(f"⚠️  Could not fetch query history: {e}")
@@ -225,7 +261,6 @@ def main():
         sys.exit(1)
 
     finally:
-        # Save results log
         with open("deploy_results.json", "w") as f:
             json.dump(results_log, f, indent=2, default=str)
         print(f"\n📄 Results saved to deploy_results.json")

@@ -1,0 +1,31 @@
+name: 'retail_analytics_v2'
+version: '1.0.0'
+config-version: 2
+
+profile: 'retail_analytics_v2'
+
+model-paths: ["models"]
+analysis-paths: ["analyses"]
+test-paths: ["tests"]
+seed-paths: ["seeds"]
+macro-paths: ["macros"]
+snapshot-paths: ["snapshots"]
+
+clean-targets:
+  - "target"
+  - "dbt_packages"
+
+models:
+  retail_analytics_v2:
+    staging:
+      +materialization: view
+      +schema: staging
+    intermediate:
+      +materialization: ephemeral
+      +schema: intermediate
+    marts:
+      +materialization: table
+      +schema: marts
+
+vars:
+  payment_methods: ['credit_card', 'coupon', 'bank_transfer', 'gift_card']

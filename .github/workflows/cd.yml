@@ -10,7 +10,7 @@ on:
   push:
     branches: [main]
     paths:
-      - "generated_projects/retail_dbt_v1/**"
+      - "generated_projects/**"
       - "scripts/snowflake_deploy.py"
       - ".github/workflows/cd.yml"
 

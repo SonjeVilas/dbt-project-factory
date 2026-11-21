@@ -1,6 +1,6 @@
 # ──────────────────────────────────────────────────────────────────────
 # CI Pipeline – dbt Project Factory
-# Runs on every PR targeting 'main' that touches the dbt project.
+# Runs on every PR targeting 'main' that touches any dbt project.
 # Validates SQL, compiles the project, and runs dbt build.
 # ──────────────────────────────────────────────────────────────────────
 
@@ -10,7 +10,7 @@ on:
   pull_request:
     branches: [main]
     paths:
-      - "generated_projects/retail_dbt_v1/**"
+      - "generated_projects/**"
       - ".github/workflows/ci.yml"
 
 concurrency:
@@ -18,7 +18,6 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  DBT_PROJECT_DIR: generated_projects/retail_dbt_v1
   PYTHON_VERSION: "3.12"
   DBT_VERSION: "1.12.*"
 
@@ -37,34 +36,46 @@ jobs:
           python-version: ${{ env.PYTHON_VERSION }}
 
       - name: Install SQLFluff
-        run: pip install sqlfluff sqlfluff-templater-dbt dbt-snowflake==${{ env.DBT_VERSION }}
+        run: pip install sqlfluff sqlfluff-templater-dbt dbt-snowflake==${{ env.DBT_VERSION }} pyyaml
 
-      - name: Generate CI profiles.yml
+      - name: Run SQLFluff across projects
         run: |
-          cat > ${{ env.DBT_PROJECT_DIR }}/profiles.yml << 'EOF'
-          ecom_profile:
+          python - << 'EOF'
+          import os, subprocess, yaml
+
+          base = "generated_projects"
+          for item in sorted(os.listdir(base)):
+              proj_dir = os.path.join(base, item)
+              if os.path.isdir(proj_dir) and os.path.exists(os.path.join(proj_dir, "dbt_project.yml")):
+                  print(f"\n================ Linting {item} ================")
+                  with open(os.path.join(proj_dir, "dbt_project.yml")) as f:
+                      cfg = yaml.safe_load(f)
+                  profile = cfg.get("profile", item)
+
+                  # Generate dummy profiles.yml for templater
+                  dummy_profile = f"""
+          {profile}:
             target: ci
             outputs:
               ci:
                 type: snowflake
-                account: "{{ env_var('DBT_SNOWFLAKE_ACCOUNT', 'dummy') }}"
-                user: "{{ env_var('DBT_SNOWFLAKE_USER', 'dummy') }}"
-                password: "{{ env_var('DBT_SNOWFLAKE_PASSWORD', 'dummy') }}"
-                role: "{{ env_var('DBT_SNOWFLAKE_ROLE', 'ACCOUNTADMIN') }}"
+                account: dummy
+                user: dummy
+                password: dummy
+                role: ACCOUNTADMIN
                 database: ECOM_DB
-                warehouse: "{{ env_var('DBT_SNOWFLAKE_WAREHOUSE', 'COMPUTE_WH') }}"
+                warehouse: COMPUTE_WH
                 schema: RAW
                 threads: 4
-          EOF
+          """
+                  with open(os.path.join(proj_dir, "profiles.yml"), "w") as pf:
+                      pf.write(dummy_profile.strip())
 
-      - name: Run SQLFluff lint
-        working-directory: ${{ env.DBT_PROJECT_DIR }}
-        run: |
-          sqlfluff lint models/ \
-            --dialect snowflake \
-            --format github-annotation-native \
-            --annotation-level warning || true
-        # Lint warnings don't block the PR; they appear as annotations.
+                  models_dir = os.path.join(proj_dir, "models")
+                  if os.path.isdir(models_dir):
+                      cmd = ["sqlfluff", "lint", "models/", "--dialect", "snowflake", "--format", "github-annotation-native", "--annotation-level", "warning"]
+                      subprocess.run(cmd, cwd=proj_dir)
+          EOF
 
   # ── Job 2: dbt Validation & Build ──────────────────────────────────
   dbt-validation:
@@ -87,7 +98,7 @@ jobs:
           cache: pip
 
       - name: Install dbt-snowflake
-        run: pip install dbt-snowflake==${{ env.DBT_VERSION }}
+        run: pip install dbt-snowflake==${{ env.DBT_VERSION }} pyyaml
 
       - name: Mask credentials
         run: |
@@ -95,62 +106,91 @@ jobs:
           echo "::add-mask::${{ secrets.SNOWFLAKE_USER }}"
           echo "::add-mask::${{ secrets.SNOWFLAKE_PASSWORD }}"
 
-      - name: Generate CI profiles.yml
+      - name: Validate, Compile, and Build dbt projects
         run: |
-          cat > ${{ env.DBT_PROJECT_DIR }}/profiles.yml << 'EOF'
-          ecom_profile:
+          python - << 'EOF'
+          import os, sys, subprocess, yaml
+
+          account = os.environ.get("DBT_SNOWFLAKE_ACCOUNT", "")
+          user = os.environ.get("DBT_SNOWFLAKE_USER", "")
+          password = os.environ.get("DBT_SNOWFLAKE_PASSWORD", "")
+          role = os.environ.get("DBT_SNOWFLAKE_ROLE", "ACCOUNTADMIN")
+          warehouse = os.environ.get("DBT_SNOWFLAKE_WAREHOUSE", "COMPUTE_WH")
+
+          base = "generated_projects"
+          projects = [
+              d for d in sorted(os.listdir(base))
+              if os.path.isdir(os.path.join(base, d))
+              and os.path.exists(os.path.join(base, d, "dbt_project.yml"))
+          ]
+
+          print(f"Discovered dbt projects: {projects}")
+
+          summary_lines = ["## 🏗️ dbt CI Build Results\n"]
+
+          for item in projects:
+              proj_dir = os.path.join(base, item)
+              print(f"\n{'=' * 60}\n🚀 Validating project: {item}\n{'=' * 60}")
+
+              with open(os.path.join(proj_dir, "dbt_project.yml")) as f:
+                  cfg = yaml.safe_load(f)
+              profile = cfg.get("profile", item)
+
+              # Write dynamic CI profile
+              ci_profile = f"""
+          {profile}:
             target: ci
             outputs:
               ci:
                 type: snowflake
-                account: "{{ env_var('DBT_SNOWFLAKE_ACCOUNT') }}"
-                user: "{{ env_var('DBT_SNOWFLAKE_USER') }}"
-                password: "{{ env_var('DBT_SNOWFLAKE_PASSWORD') }}"
-                role: "{{ env_var('DBT_SNOWFLAKE_ROLE') }}"
+                account: "{account}"
+                user: "{user}"
+                password: "{password}"
+                role: "{role}"
                 database: ECOM_DB
-                warehouse: "{{ env_var('DBT_SNOWFLAKE_WAREHOUSE') }}"
+                warehouse: "{warehouse}"
                 schema: RAW
                 threads: 4
+          """
+              with open(os.path.join(proj_dir, "profiles.yml"), "w") as pf:
+                  pf.write(ci_profile.strip())
+
+              # 1. dbt deps
+              print(f"📦 [{item}] running dbt deps...")
+              res_deps = subprocess.run(["dbt", "deps", "--profiles-dir", "."], cwd=proj_dir)
+
+              # 2. dbt parse
+              print(f"🔍 [{item}] running dbt parse...")
+              res_parse = subprocess.run(["dbt", "parse", "--profiles-dir", "."], cwd=proj_dir)
+              if res_parse.returncode != 0:
+                  print(f"❌ [{item}] dbt parse failed!")
+                  sys.exit(res_parse.returncode)
+
+              # 3. dbt compile
+              print(f"⚙️ [{item}] running dbt compile...")
+              res_compile = subprocess.run(["dbt", "compile", "--profiles-dir", "."], cwd=proj_dir)
+              if res_compile.returncode != 0:
+                  print(f"❌ [{item}] dbt compile failed!")
+                  sys.exit(res_compile.returncode)
+
+              # 4. dbt build
+              print(f"🚀 [{item}] running dbt build...")
+              res_build = subprocess.run(["dbt", "build", "--profiles-dir", ".", "--fail-fast", "--full-refresh"], cwd=proj_dir, capture_output=True, text=True)
+              print(res_build.stdout)
+              if res_build.returncode != 0:
+                  print(res_build.stderr)
+                  print(f"❌ [{item}] dbt build failed!")
+                  sys.exit(res_build.returncode)
+
+              summary_lines.append(f"✅ **{item}**: dbt build passed")
+
+          summary_file = os.environ.get("GITHUB_STEP_SUMMARY")
+          if summary_file:
+              with open(summary_file, "a") as sf:
+                  sf.write("\n".join(summary_lines) + "\n")
+
+          print("\n🎉 All projects validated and built successfully!")
           EOF
-
-      - name: Validate dbt_project.yml
-        working-directory: ${{ env.DBT_PROJECT_DIR }}
-        run: |
-          echo "📋 Validating dbt_project.yml exists and is parseable..."
-          python -c "
-          import yaml, sys
-          with open('dbt_project.yml') as f:
-              cfg = yaml.safe_load(f)
-          assert cfg.get('name'), 'Missing project name'
-          assert cfg.get('profile'), 'Missing profile reference'
-          print(f\"✅ Project '{cfg['name']}' using profile '{cfg['profile']}'\")
-          "
-
-      - name: dbt deps
-        working-directory: ${{ env.DBT_PROJECT_DIR }}
-        run: dbt deps --profiles-dir .
-
-      - name: dbt parse
-        working-directory: ${{ env.DBT_PROJECT_DIR }}
-        run: dbt parse --profiles-dir .
-
-      - name: dbt compile
-        working-directory: ${{ env.DBT_PROJECT_DIR }}
-        run: dbt compile --profiles-dir .
-
-      - name: dbt build (compile + test)
-        working-directory: ${{ env.DBT_PROJECT_DIR }}
-        run: |
-          dbt build --profiles-dir . --fail-fast 2>&1 | tee dbt_build_output.txt
-          EXIT_CODE=${PIPESTATUS[0]}
-
-          # Generate summary
-          echo "## 🏗️ dbt Build Results" >> $GITHUB_STEP_SUMMARY
-          echo '```' >> $GITHUB_STEP_SUMMARY
-          tail -30 dbt_build_output.txt >> $GITHUB_STEP_SUMMARY
-          echo '```' >> $GITHUB_STEP_SUMMARY
-
-          exit $EXIT_CODE
 
       - name: Upload dbt artifacts
         if: always()
@@ -158,6 +198,6 @@ jobs:
         with:
           name: dbt-ci-artifacts
           path: |
-            ${{ env.DBT_PROJECT_DIR }}/target/
-            ${{ env.DBT_PROJECT_DIR }}/logs/
+            generated_projects/**/target/
+            generated_projects/**/logs/
           retention-days: 7

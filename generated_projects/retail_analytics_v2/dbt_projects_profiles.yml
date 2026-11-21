@@ -1,0 +1,7 @@
+retail_analytics_v2:
+  target: dev
+  outputs:
+    dev:
+      type: snowflake
+      schema: RAW
+      threads: 4

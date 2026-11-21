@@ -1,0 +1,117 @@
+version: 2
+
+models:
+  - name: stg_ecom__customers
+    description: "Cleansed and standardized customer records with standardized name casing, lowercased emails, and null IDs filtered."
+    columns:
+      - name: customer_id
+        description: "Customer identifier."
+        data_type: NUMBER(38,0)
+        tests:
+          - unique
+          - not_null
+      - name: first_name
+        description: "Cleaned, capitalized customer first name."
+        data_type: TEXT(300)
+        tests:
+          - not_null
+      - name: last_name
+        description: "Cleaned, capitalized customer last name."
+        data_type: TEXT(300)
+        tests:
+          - not_null
+      - name: email
+        description: "Standardized lower-cased customer email address."
+        data_type: TEXT(255)
+      - name: created_at
+        description: "Account creation timestamp."
+        data_type: TIMESTAMP_NTZ
+        tests:
+          - not_null
+      - name: standard_timestamp
+        description: "Ingestion standardization timestamp."
+        data_type: TIMESTAMP_LTZ
+        tests:
+          - not_null
+
+  - name: stg_ecom__orders
+    description: "Standardized order headers with normalized status strings, typed transaction dates, and standardized amounts."
+    columns:
+      - name: order_id
+        description: "Unique sales order identifier."
+        data_type: NUMBER(38,0)
+        tests:
+          - unique
+          - not_null
+      - name: customer_id
+        description: "Identifier referencing customer who placed the order."
+        data_type: NUMBER(38,0)
+        tests:
+          - relationships:
+              to: ref('stg_ecom__customers')
+              field: customer_id
+      - name: order_date
+        description: "Standardized date when the order was placed."
+        data_type: DATE
+        tests:
+          - not_null
+      - name: status
+        description: "Cleaned, upper-cased order lifecycle status."
+        data_type: TEXT(50)
+        tests:
+          - not_null
+          - accepted_values:
+              values: ['PENDING', 'COMPLETED', 'CANCELLED', 'pending', 'completed', 'cancelled']
+      - name: total_amount
+        description: "Standardized decimal order total amount."
+        data_type: NUMBER(10,2)
+        tests:
+          - not_null
+      - name: standard_timestamp
+        description: "Ingestion standardization timestamp."
+        data_type: TIMESTAMP_LTZ
+        tests:
+          - not_null
+
+  - name: stg_ecom__order_items
+    description: "Standardized order line items with explicit key casting and calculated line-item total monetary value."
+    columns:
+      - name: item_id
+        description: "Unique line item identifier."
+        data_type: NUMBER(38,0)
+        tests:
+          - unique
+          - not_null
+      - name: order_id
+        description: "Identifier referencing parent order."
+        data_type: NUMBER(38,0)
+        tests:
+          - not_null
+          - relationships:
+              to: ref('stg_ecom__orders')
+              field: order_id
+      - name: product_id
+        description: "Identifier referencing product."
+        data_type: NUMBER(38,0)
+        tests:
+          - not_null
+      - name: quantity
+        description: "Quantity of product units ordered."
+        data_type: NUMBER(38,0)
+        tests:
+          - not_null
+      - name: unit_price
+        description: "Price per unit of product."
+        data_type: NUMBER(10,2)
+        tests:
+          - not_null
+      - name: item_total
+        description: "Calculated line item monetary subtotal."
+        data_type: NUMBER(16,2)
+        tests:
+          - not_null
+      - name: standard_timestamp
+        description: "Ingestion standardization timestamp."
+        data_type: TIMESTAMP_LTZ
+        tests:
+          - not_null

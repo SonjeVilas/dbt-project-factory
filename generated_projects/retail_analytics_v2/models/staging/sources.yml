@@ -1,0 +1,62 @@
+version: 2
+
+sources:
+  - name: ecom
+    description: Raw ingested e-commerce source tables.
+    database: ECOM_DB
+    schema: RAW
+    freshness:
+      warn_after: {count: 24, period: hour}
+      error_after: {count: 48, period: hour}
+    loaded_at_field: CREATED_AT
+    tables:
+      - name: customers
+        description: Raw ingested source table containing individual customer profiles and account registrations.
+        columns:
+          - name: CUSTOMER_ID
+            description: Unique identifier for each customer.
+            tests:
+              - unique
+              - not_null
+          - name: FIRST_NAME
+            description: Customer first name.
+          - name: LAST_NAME
+            description: Customer last name or surname.
+          - name: EMAIL
+            description: Customer contact email address.
+          - name: CREATED_AT
+            description: Timestamp indicating customer account creation date and time.
+
+      - name: orders
+        description: Raw ingested source table containing header-level sales order records.
+        columns:
+          - name: ORDER_ID
+            description: Unique identifier for each sales order.
+            tests:
+              - unique
+              - not_null
+          - name: CUSTOMER_ID
+            description: Identifier of the customer who placed the order.
+          - name: ORDER_DATE
+            description: Date on which the order was placed.
+          - name: STATUS
+            description: Current lifecycle status of the order (e.g., PENDING, COMPLETED, CANCELLED).
+          - name: TOTAL_AMOUNT
+            description: Total monetary value of the order transaction.
+
+      - name: order_items
+        description: Raw ingested source table containing line items for each order.
+        columns:
+          - name: ITEM_ID
+            description: Unique identifier for each order line item.
+            tests:
+              - unique
+              - not_null
+          - name: ORDER_ID
+            description: Identifier of the order to which this line item belongs.
+          - name: PRODUCT_ID
+            description: Identifier of the purchased product.
+          - name: QUANTITY
+            description: Units of the product purchased.
+          - name: UNIT_PRICE
+            description: Price per single unit of the product.
